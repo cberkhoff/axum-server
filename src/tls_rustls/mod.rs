@@ -33,8 +33,11 @@ use crate::{
     server::{io_other, Server},
 };
 use arc_swap::ArcSwap;
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use std::time::Duration;
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer}, 
+    ServerConfig
+};
+use std::{convert::TryFrom, time::Duration};
 use std::{fmt, io, net::SocketAddr, path::Path, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -218,6 +221,7 @@ impl RustlsConfig {
     ///
     /// The private key must be DER-encoded ASN.1 in either PKCS#8 or PKCS#1 format.
     pub async fn reload_from_der(&self, cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<()> {
+        // TODO
         let server_config = spawn_blocking(|| config_from_der(cert, key))
             .await
             .unwrap()?;
@@ -265,12 +269,8 @@ impl fmt::Debug for RustlsConfig {
     }
 }
 
-fn config_from_der(cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<ServerConfig> {
-    let cert = cert.into_iter().map(Certificate).collect();
-    let key = PrivateKey(key);
-
+fn config_from_cert_pk(cert: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) -> io::Result<ServerConfig> {
     let mut config = ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(cert, key)
         .map_err(io_other)?;
@@ -280,16 +280,16 @@ fn config_from_der(cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<ServerConfig>
     Ok(config)
 }
 
-fn config_from_pem(cert: Vec<u8>, key: Vec<u8>) -> io::Result<ServerConfig> {
-    use rustls_pemfile::Item;
+fn config_from_der(cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<ServerConfig> {
+    let cert = cert.into_iter().map(CertificateDer::from).collect();
+    let key = PrivateKeyDer::try_from(key).map_err(io_other)?;
+    config_from_cert_pk(cert, key)
+}
 
-    let cert = rustls_pemfile::certs(&mut cert.as_ref())?;
-    let key = match rustls_pemfile::read_one(&mut key.as_ref())? {
-        Some(Item::RSAKey(key)) | Some(Item::PKCS8Key(key)) | Some(Item::ECKey(key)) => key,
-        _ => return Err(io_other("private key format not supported")),
-    };
-
-    config_from_der(cert, key)
+fn config_from_pem(cert_data: Vec<u8>, key_data: Vec<u8>) -> io::Result<ServerConfig> {
+    let cert = rustls_pemfile::certs(&mut cert_data.as_ref()).flatten().collect();
+    let key = rustls_pemfile::private_key(&mut key_data.as_ref()).map_err(io_other)?;
+    config_from_cert_pk(cert, key.unwrap())
 }
 
 async fn config_from_pem_file(
@@ -316,15 +316,16 @@ mod tests {
         Body,
     };
     use rustls::{
-        client::{ServerCertVerified, ServerCertVerifier},
-        Certificate, ClientConfig, ServerName,
+        client::danger::{ServerCertVerified, ServerCertVerifier, HandshakeSignatureValid},
+        ClientConfig, SignatureScheme,
+        pki_types::{CertificateDer, ServerName},
     };
     use std::{
         convert::TryFrom,
         io,
         net::SocketAddr,
         sync::Arc,
-        time::{Duration, SystemTime},
+        time::Duration,
     };
     use tokio::time::sleep;
     use tokio::{net::TcpStream, task::JoinHandle, time::timeout};
@@ -511,13 +512,13 @@ mod tests {
         (handle, server_task, addr)
     }
 
-    async fn get_first_cert(addr: SocketAddr) -> Certificate {
+    async fn get_first_cert(addr: SocketAddr) -> CertificateDer<'static> {
         let stream = TcpStream::connect(addr).await.unwrap();
         let tls_stream = tls_connector().connect(dns_name(), stream).await.unwrap();
 
         let (_io, client_connection) = tls_stream.into_inner();
 
-        client_connection.peer_certificates().unwrap()[0].clone()
+        client_connection.peer_certificates().unwrap()[0].clone().into_owned()
     }
 
     async fn connect(addr: SocketAddr) -> (SendRequest<Body>, JoinHandle<()>) {
@@ -548,24 +549,50 @@ mod tests {
     }
 
     fn tls_connector() -> TlsConnector {
+        #[derive(Debug)]
         struct NoVerify;
 
         impl ServerCertVerifier for NoVerify {
             fn verify_server_cert(
                 &self,
-                _end_entity: &Certificate,
-                _intermediates: &[Certificate],
-                _server_name: &ServerName,
-                _scts: &mut dyn Iterator<Item = &[u8]>,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
                 _ocsp_response: &[u8],
-                _now: SystemTime,
+                _now: rustls::pki_types::UnixTime,
             ) -> Result<ServerCertVerified, rustls::Error> {
                 Ok(ServerCertVerified::assertion())
+            }
+            
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &rustls::DigitallySignedStruct,
+            ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                vec![
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SignatureScheme::RSA_PSS_SHA256,
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                ]
             }
         }
 
         let mut client_config = ClientConfig::builder()
-            .with_safe_defaults()
+            .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerify))
             .with_no_client_auth();
 
@@ -574,7 +601,7 @@ mod tests {
         TlsConnector::from(Arc::new(client_config))
     }
 
-    fn dns_name() -> ServerName {
+    fn dns_name() -> ServerName<'static> {
         ServerName::try_from("localhost").unwrap()
     }
 }
