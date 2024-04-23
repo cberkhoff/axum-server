@@ -33,17 +33,11 @@ use crate::{
     server::{io_other, Server},
 };
 use arc_swap::ArcSwap;
-<<<<<<< HEAD
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::Item;
-use std::time::Duration;
-=======
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer}, 
     ServerConfig
 };
 use std::{convert::TryFrom, time::Duration};
->>>>>>> 6289364 (Making it work for Rustls 0.22)
 use std::{fmt, io, net::SocketAddr, path::Path, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -298,28 +292,6 @@ fn config_from_cert_pk(cert: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'s
     Ok(config)
 }
 
-<<<<<<< HEAD
-fn config_from_pem(cert: Vec<u8>, key: Vec<u8>) -> io::Result<ServerConfig> {
-    let cert = rustls_pemfile::certs(&mut cert.as_ref())
-        .map(|it| it.map(|it| it.to_vec()))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Check the entire PEM file for the key in case it is not first section
-    let mut key_vec: Vec<Vec<u8>> = rustls_pemfile::read_all(&mut key.as_ref())
-        .filter_map(|i| match i.ok()? {
-            Item::Sec1Key(key) => Some(key.secret_sec1_der().to_vec()),
-            Item::Pkcs1Key(key) => Some(key.secret_pkcs1_der().to_vec().into()),
-            Item::Pkcs8Key(key) => Some(key.secret_pkcs8_der().to_vec().into()),
-            _ => None,
-        })
-        .collect();
-
-    // Make sure file contains only one key
-    if key_vec.len() != 1 {
-        return Err(io_other("private key format not supported"));
-    }
-
-    config_from_der(cert, key_vec.pop().unwrap())
-=======
 fn config_from_der(cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<ServerConfig> {
     let cert = cert.into_iter().map(CertificateDer::from).collect();
     let key = PrivateKeyDer::try_from(key).map_err(io_other)?;
@@ -330,7 +302,6 @@ fn config_from_pem(cert_data: Vec<u8>, key_data: Vec<u8>) -> io::Result<ServerCo
     let cert = rustls_pemfile::certs(&mut cert_data.as_ref()).flatten().collect();
     let key = rustls_pemfile::private_key(&mut key_data.as_ref()).map_err(io_other)?;
     config_from_cert_pk(cert, key.unwrap())
->>>>>>> 6289364 (Making it work for Rustls 0.22)
 }
 
 async fn config_from_pem_file(
