@@ -232,18 +232,6 @@ impl RustlsConfig {
         Ok(())
     }
 
-    /// This helper will establish a TLS server based on strong cipher suites
-    /// from a PEM-formatted certificate chain and key.
-    pub async fn from_pem_chain_file(
-        chain: impl AsRef<Path>,
-        key: impl AsRef<Path>,
-    ) -> io::Result<Self> {
-        let server_config = config_from_pem_chain_file(chain, key).await?;
-        let inner = Arc::new(ArcSwap::from_pointee(server_config));
-
-        Ok(Self { inner })
-    }
-
     /// Reload config from PEM formatted data.
     ///
     /// Certificate and private key must be in PEM format.
@@ -312,31 +300,6 @@ async fn config_from_pem_file(
     let key = tokio::fs::read(key.as_ref()).await?;
 
     config_from_pem(cert, key)
-}
-
-async fn config_from_pem_chain_file(
-    cert: impl AsRef<Path>,
-    chain: impl AsRef<Path>,
-) -> io::Result<ServerConfig> {
-    let cert = tokio::fs::read(cert.as_ref()).await?;
-    let cert = rustls_pemfile::certs(&mut cert.as_ref())
-        .map(|it| it.map(|it| rustls::Certificate(it.to_vec())))
-        .collect::<Result<Vec<_>, _>>()?;
-    let key = tokio::fs::read(chain.as_ref()).await?;
-    let key_cert: rustls::PrivateKey = match rustls_pemfile::read_one(&mut key.as_ref())?
-        .ok_or_else(|| io_other("could not parse pem file"))?
-    {
-        Item::Pkcs8Key(key) => Ok(rustls::PrivateKey(key.secret_pkcs8_der().to_vec().into())),
-        x => Err(io_other(format!(
-            "invalid certificate format, received: {x:?}"
-        ))),
-    }?;
-
-    ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(cert, key_cert)
-        .map_err(|_| io_other("invalid certificate"))
 }
 
 #[cfg(test)]
